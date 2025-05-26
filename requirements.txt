@@ -1,0 +1,4 @@
+pdfplumber==0.10.3
+colorama==0.4.6
+pandas==2.0.3
+PyMuPDF==1.23.1
