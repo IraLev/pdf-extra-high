@@ -1,3 +1,72 @@
+"""
+PDF Highlight Extractor
+======================
+
+A robust tool for extracting highlighted text from PDF files with intelligent text ordering
+and hyphenation handling.
+
+Overview:
+--------
+This tool addresses common PDF text extraction challenges:
+- PDFs store text in creation order, not reading order
+- Multi-line highlights can extract in wrong sequence
+- Hyphenated words across lines need rejoining
+- Boundary words may be partially highlighted
+
+Architecture:
+------------
+1. PDFHighlightExtractor: Main class handling extraction logic
+2. Multi-method extraction: Fallback system for maximum compatibility
+3. Smart text ordering: Line detection and geometric sorting
+4. Hyphenation merger: Detects and combines split words
+
+Technical Approach:
+-----------------
+METHOD A: PyMuPDF built-in text sorting
+- Uses page.get_text("text", sort=True) for automatic ordering
+- Most reliable for simple layouts
+
+METHOD B: Text block extraction
+- Extracts PDF text blocks which maintain better reading order
+- Geometric sorting by block position
+
+METHOD C: Enhanced word-level sorting
+- Individual word extraction with custom line detection
+- Groups words by Y-position, sorts by X-position within lines
+- Handles complex multi-line highlights
+
+Hyphenation Algorithm:
+--------------------
+1. Detects highlights ending with '-'
+2. Checks next highlight for same color and reasonable distance
+3. Merges: "lin-" + "guistics" → "linguistics"
+4. Supports both same-page and cross-page hyphenation
+
+Color Detection:
+---------------
+- RGB color space analysis
+- Supports 4 highlight colors: Yellow, Pink, Green, Blue
+- Handles both fill and stroke color properties
+
+Precision Control:
+-----------------
+- 40% overlap threshold for word inclusion
+- +2 pixel boundary expansion for edge cases
+- 5-pixel line tolerance for multi-line detection
+
+Usage Patterns:
+--------------
+Test Mode: python script.py --test
+- Uses default PDF path
+- Display-only output
+- Quick testing and debugging
+
+Full Mode: python script.py
+- Interactive prompts for file paths
+- Optional JSON/CSV export
+- Complete control over options
+"""
+import time
 import pdfplumber
 import fitz  # PyMuPDF
 import json
@@ -5,535 +74,635 @@ from colorama import init, Fore, Back, Style
 import pandas as pd
 from pathlib import Path
 import re
+import sys
 
 # Initialize colorama for colored terminal output
 init(autoreset=True)
 
 class PDFHighlightExtractor:
-    def __init__(self, pdf_path):
-        self.pdf_path = Path(pdf_path)
-        self.annotations = []
-        self.highlights = []
+    """
+Main extraction class for PDF highlighted text.
 
-    def extract_annotation_highlights(self):
-        """Extract ALL types of annotations with improved processing."""
-        annotations = []
-        try:
-            with pdfplumber.open(self.pdf_path) as pdf:
-                print(f"📄 Processing annotations...")
-                for page_num, page in enumerate(pdf.pages, 1):
-                    if hasattr(page, 'annots') and page.annots:
-                        page_annotations = 0
-                        for i, annot in enumerate(page.annots):
-                            try:
-                                annot_type = annot.get('subtype', 'Unknown')
+This class handles the complete extraction pipeline from PDF analysis
+to formatted output with intelligent text ordering and hyphenation.
+
+Key Features:
+------------
+- Multi-method text extraction with fallback
+- Geometric text ordering for proper reading sequence
+- Hyphenation detection and merging
+- 4-color highlight support (Yellow, Pink, Green, Blue)
+- Cross-page highlight handling
+
+Extraction Pipeline:
+------------------
+1. PDF Loading: Opens PDF with PyMuPDF
+2. Annotation Detection: Finds highlight annotations
+3. Color Classification: Identifies highlight colors
+4. Text Extraction: Uses multi-method approach
+5. Text Ordering: Applies geometric sorting
+6. Hyphenation Merging: Combines split words
+7. Output Formatting: Prepares results for display/export
+
+Methods Overview:
+---------------
+extract_all_highlights(): Main entry point
+_extract_text_balanced(): Core text extraction with ordering
+_smart_hyphenation_merge(): Hyphenation detection and merging
+_is_clear_hyphenation(): Hyphenation pattern recognition
+display_results(): Formatted terminal output
+
+Usage:
+------
+extractor = PDFHighlightExtractor('path/to/file.pdf')
+annotations, highlights = extractor.extract_all_highlights()
+extractor.display_results()
+"""
+def __init__(self, pdf_path):
+    self.pdf_path = Path(pdf_path)
+    self.annotations = []
+    self.highlights = []
+
+def extract_annotation_highlights(self):
+    """Extract annotations with simple processing."""
+    annotations = []
+    try:
+        with pdfplumber.open(self.pdf_path) as pdf:
+            print(f"📄 Processing annotations...")
+            for page_num, page in enumerate(pdf.pages, 1):
+                if hasattr(page, 'annots') and page.annots:
+                    for annot in page.annots:
+                        try:
+                            annot_type = annot.get('subtype', 'Unknown')
+                            if annot_type in ['Highlight', 'Squiggly', 'StrikeOut', 'Underline', 'FreeText', 'Text']:
+                                rect = annot.get('rect', [])
+                                text = self._get_annotation_text(page, annot, rect)
+                                color = self._get_simple_color(annot.get('color', []))
                                 
-                                # Process all annotation types
-                                if annot_type in ['Highlight', 'Squiggly', 'StrikeOut', 'Underline', 'FreeText', 'Text']:
-                                    rect = annot.get('rect', [])
-                                    
-                                    # Try multiple text extraction methods
-                                    text = self._get_annotation_text(page, annot, rect)
-                                    color = self._get_color_from_annot(annot)
-                                    
-                                    if text and text.strip():
-                                        annotations.append({
-                                            'page': page_num,
-                                            'text': self._clean_text(text),
-                                            'color': color,
-                                            'type': f'annotation_{annot_type.lower()}',
-                                            'coordinates': rect,
-                                            'y_position': rect[1] if len(rect) >= 4 else 0
-                                        })
-                                        page_annotations += 1
-                            except Exception as e:
-                                continue
-                        
-                        if page_annotations > 0:
-                            print(f"  ✅ Page {page_num}: Found {page_annotations} annotations")
-            
-            print(f"  📊 Total annotations: {len(annotations)}")
-        except Exception as e:
-            print(f"❌ Error reading annotations: {e}")
+                                if text and text.strip():
+                                    annotations.append({
+                                        'page': page_num,
+                                        'text': text.strip(),
+                                        'color': color,
+                                        'type': 'annotation',
+                                        'y_position': rect[1] if len(rect) >= 4 else 0
+                                    })
+                        except:
+                            continue
         
-        return annotations
+        print(f"  ✅ Found {len(annotations)} annotations")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+    
+    return annotations
 
-    def _get_annotation_text(self, page, annot, rect):
-        """Try multiple methods to extract annotation text."""
-        # Method 1: From annotation contents
-        text = annot.get('contents', '').strip()
-        if text:
-            return text
+def extract_background_highlights(self):
+    """Extract highlights with BALANCED precision - capture complete highlights."""
+    all_highlights = []
+    
+    try:
+        print(f"\n🎨 Processing highlights...")
+        doc = fitz.open(str(self.pdf_path))
         
-        # Method 2: From rect area
-        if rect and len(rect) == 4:
-            try:
-                x0, y0, x1, y1 = rect
-                cropped = page.crop((x0-1, y0-1, x1+1, y1+1))
-                text = cropped.extract_text()
-                if text and text.strip():
-                    return text.strip()
-            except:
-                pass
+        # Collect each individual highlight with BALANCED extraction
+        for page_num in range(doc.page_count):
+            page = doc[page_num]
+            annotations = page.annots()
+            
+            for annot in annotations:
+                try:
+                    if annot.type[1] == 'Highlight':
+                        colors = annot.colors
+                        color_name = self._get_highlight_color(colors)
+                        
+                        if color_name in ['yellow', 'pink', 'green', 'blue']:
+                            # BALANCED: Extract complete highlighted phrases
+                            text = self._extract_text_balanced(page, annot)
+                            
+                            if text and text.strip():
+                                all_highlights.append({
+                                    'page': page_num + 1,
+                                    'text': text.strip(),
+                                    'color': color_name,
+                                    'type': 'highlight',
+                                    'y_position': annot.rect.y0,
+                                    'x_position': annot.rect.x0,
+                                    'y_end': annot.rect.y1,
+                                    'x_end': annot.rect.x1,
+                                    'rect': annot.rect
+                                })
+                                print(f"    🎨 {color_name.upper()}: \"{text[:70]}...\"")
+                except Exception as e:
+                    continue
         
-        # Method 3: From annotation object properties
-        for prop in ['label', 'title', 'subject']:
-            text = annot.get(prop, '').strip()
-            if text:
-                return text
+        doc.close()
         
+        # Smart hyphenation merging only
+        merged_highlights = self._smart_hyphenation_merge(all_highlights)
+        
+        print(f"  📊 Raw: {len(all_highlights)} → Merged: {len(merged_highlights)}")
+        return merged_highlights
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return []
+
+def _extract_text_balanced(self, page, annot):
+    """BALANCED: Extract text with PROPER READING ORDER."""
+    try:
+        # Method 1: Use PyMuPDF's built-in text ordering with sorting
+        highlight_rect = annot.rect
+        
+        # SMALL EXPANSION for boundary words
+        expanded_rect = fitz.Rect(
+            highlight_rect.x0 - 2,
+            highlight_rect.y0 - 1, 
+            highlight_rect.x1 + 2,
+            highlight_rect.y1 + 1
+        )
+        
+        # METHOD A: Use text extraction with BUILT-IN SORTING
+        print(f"      🔍 Method A: Text extraction with sorting")
+        text_with_sort = page.get_text("text", clip=expanded_rect, sort=True)
+        if text_with_sort and text_with_sort.strip():
+            cleaned_text = re.sub(r'\s+', ' ', text_with_sort.strip())
+            print(f"      ✅ Sorted text result: \"{cleaned_text}\"")
+            return cleaned_text
+        
+        # METHOD B: Text blocks (better reading order than individual words)
+        print(f"      🔍 Method B: Text blocks extraction")
+        text_blocks = page.get_text("blocks", clip=expanded_rect)
+        if text_blocks:
+            # Sort blocks by reading order (top to bottom, left to right)
+            text_blocks.sort(key=lambda block: (block[1], block[0]))  # y-pos, then x-pos
+            
+            block_texts = []
+            for block in text_blocks:
+                if len(block) >= 5 and block[4].strip():
+                    block_text = block[4].strip()
+                    block_text = re.sub(r'\s+', ' ', block_text)
+                    block_texts.append(block_text)
+            
+            if block_texts:
+                combined_text = " ".join(block_texts)
+                print(f"      ✅ Block result: \"{combined_text}\"")
+                return combined_text
+        
+        # METHOD C: Enhanced word-level with geometric sorting
+        print(f"      🔍 Method C: Enhanced word sorting")
+        all_words = page.get_text("words")
+        highlight_words = []
+        
+        for word in all_words:
+            word_rect = fitz.Rect(word[:4])
+            word_text = word[4]
+            
+            if expanded_rect.intersects(word_rect):
+                intersection = expanded_rect & word_rect
+                word_area = word_rect.get_area()
+                
+                if word_area > 0:
+                    overlap_ratio = intersection.get_area() / word_area
+                    
+                    if overlap_ratio >= 0.40:
+                        highlight_words.append({
+                            'text': word_text,
+                            'x0': word[0],
+                            'y0': word[1],
+                            'x1': word[2],
+                            'y1': word[3],
+                            'center_y': (word[1] + word[3]) / 2,
+                            'center_x': (word[0] + word[2]) / 2
+                        })
+        
+        if highlight_words:
+            # ENHANCED SORTING: Group by lines first, then sort within lines
+            # Group words by approximate line (within 5 pixels of each other)
+            lines = []
+            for word in highlight_words:
+                placed = False
+                for line in lines:
+                    # Check if word belongs to existing line
+                    avg_y = sum(w['center_y'] for w in line) / len(line)
+                    if abs(word['center_y'] - avg_y) <= 5:  # Same line tolerance
+                        line.append(word)
+                        placed = True
+                        break
+                
+                if not placed:
+                    lines.append([word])
+            
+            # Sort lines by Y position (top to bottom)
+            lines.sort(key=lambda line: sum(w['center_y'] for w in line) / len(line))
+            
+            # Sort words within each line by X position (left to right)
+            for line in lines:
+                line.sort(key=lambda w: w['center_x'])
+            
+            # Combine all words in reading order
+            ordered_words = []
+            for line in lines:
+                ordered_words.extend(line)
+            
+            extracted_text = " ".join([w['text'] for w in ordered_words])
+            print(f"      ✅ Enhanced word sorting ({len(ordered_words)} words): \"{extracted_text}\"")
+            return extracted_text
+        
+        print(f"      ❌ No text found in highlight area")
+        return ""
+        
+    except Exception as e:
+        print(f"      ❌ Extraction error: {e}")
         return ""
 
-    def extract_background_highlights(self):
-        """Extract background highlights with word completion."""
-        highlights = []
-        try:
-            print(f"\n🎨 Processing highlights...")
-            doc = fitz.open(str(self.pdf_path))
-            
-            for page_num in range(doc.page_count):
-                page = doc[page_num]
-                page_highlights = 0
-                
-                # Get all text words on the page for word completion
-                all_words = page.get_text("words")  # [(x0, y0, x1, y1, "word", block_no, line_no, word_no)]
-                
-                annotations = page.annots()
-                for annot in annotations:
-                    try:
-                        if annot.type[1] == 'Highlight':
-                            # Get color information
-                            colors = annot.colors
-                            color_name = self._analyze_highlight_color(colors)
-                            
-                            if color_name != 'unknown':
-                                # Extract text from highlighted area
-                                rect = annot.rect
-                                highlight_text = self._extract_text_from_rect_pymupdf(page, rect)
-                                
-                                if highlight_text and len(highlight_text.strip()) > 2:
-                                    # Complete partial words at start and end
-                                    completed_text = self._complete_partial_words(highlight_text, rect, all_words)
-                                    clean_text = self._clean_text(completed_text)
-                                    
-                                    # Create highlight entry
-                                    highlight_entry = {
-                                        'page': page_num + 1,
-                                        'text': clean_text,
-                                        'color': color_name,
-                                        'type': 'highlight',
-                                        'coordinates': list(rect),
-                                        'y_position': rect.y0
-                                    }
-                                    
-                                    highlights.append(highlight_entry)
-                                    page_highlights += 1
-                    except Exception as e:
-                        continue
-                
-                if page_highlights > 0:
-                    print(f"  ✅ Page {page_num + 1}: Found {page_highlights} highlights")
-                    
-            doc.close()
-            print(f"  📊 Total highlights: {len(highlights)}")
-        except Exception as e:
-            print(f"❌ Error reading highlights: {e}")
-        
-        return highlights
 
-    def _complete_partial_words(self, highlight_text, rect, all_words):
-        """Complete partial words at the beginning and end of highlights."""
-        if not highlight_text or not all_words:
-            return highlight_text
-        
-        words = highlight_text.split()
-        if not words:
-            return highlight_text
-        
-        first_word = words[0]
-        last_word = words[-1]
-        
-        # Find words that intersect with the highlight rectangle
-        highlight_rect = fitz.Rect(rect)
-        nearby_words = []
-        
-        for word_info in all_words:
-            word_rect = fitz.Rect(word_info[:4])
-            word_text = word_info[4]
+def _extract_by_quads_balanced(self, page, annot):
+    """Extract using quad points with BALANCED precision."""
+    try:
+        quad_points = annot.vertices
+        if not quad_points:
+            return ""
             
-            # Check if word is near the highlight area (within expanded boundaries)
-            expanded_rect = fitz.Rect(
-                highlight_rect.x0 - 50,  # Expand left
-                highlight_rect.y0 - 5,   # Expand up
-                highlight_rect.x1 + 50,  # Expand right
-                highlight_rect.y1 + 5    # Expand down
+        quad_count = int(len(quad_points) / 4)
+        all_words = page.get_text("words")
+        highlight_words = []
+        
+        print(f"      🔍 Processing {quad_count} quads with balanced precision")
+        
+        for i in range(quad_count):
+            points = quad_points[i * 4: i * 4 + 4]
+            quad_rect = fitz.Quad(points).rect
+            
+            # SMALL EXPANSION - 2 pixels to catch boundary words
+            expanded_quad = fitz.Rect(
+                quad_rect.x0 - 2, quad_rect.y0 - 1,
+                quad_rect.x1 + 2, quad_rect.y1 + 1
             )
             
-            if word_rect.intersects(expanded_rect):
-                nearby_words.append((word_rect, word_text))
+            for word in all_words:
+                word_rect = fitz.Rect(word[:4])
+                word_text = word[4]
+                
+                if expanded_quad.intersects(word_rect):
+                    intersection = expanded_quad & word_rect
+                    word_area = word_rect.get_area()
+                    
+                    if word_area > 0:
+                        overlap_ratio = intersection.get_area() / word_area
+                        
+                        # RELAXED: 40% overlap required (was 75%)
+                        if overlap_ratio >= 0.40:
+                            highlight_words.append({
+                                'text': word_text,
+                                'x0': word[0],
+                                'y0': word[1],
+                                'line': self._estimate_line_number(word[1])
+                            })
+                            print(f"        ✓ Quad '{word_text}' (overlap: {overlap_ratio:.2f})")
         
-        # Sort by position (left to right, top to bottom)
-        nearby_words.sort(key=lambda x: (x[0].y0, x[0].x0))
+        if highlight_words:
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_words = []
+            for word in highlight_words:
+                word_key = (word['text'], word['x0'], word['y0'])
+                if word_key not in seen:
+                    seen.add(word_key)
+                    unique_words.append(word)
+            
+            # Sort by reading order
+            unique_words.sort(key=lambda w: (w['line'], w['x0']))
+            extracted_text = " ".join([w['text'] for w in unique_words])
+            print(f"      ✅ Quad balanced ({len(unique_words)} words): \"{extracted_text}\"")
+            return extracted_text
         
-        # Complete first word if it seems partial
-        if len(first_word) >= 3 and self._is_likely_partial(first_word):
-            completed_first = self._find_complete_word(first_word, nearby_words, 'start')
-            if completed_first and completed_first != first_word:
-                words[0] = completed_first
-                print(f"    🔧 Completed first word: '{first_word}' → '{completed_first}'")
+        return ""
         
-        # Complete last word if it seems partial
-        if len(last_word) >= 3 and self._is_likely_partial(last_word):
-            completed_last = self._find_complete_word(last_word, nearby_words, 'end')
-            if completed_last and completed_last != last_word:
-                words[-1] = completed_last
-                print(f"    🔧 Completed last word: '{last_word}' → '{completed_last}'")
-        
-        return ' '.join(words)
+    except Exception as e:
+        print(f"      ❌ Quad extraction error: {e}")
+        return ""
 
-    def _is_likely_partial(self, word):
-        """Check if a word is likely partial/incomplete."""
-        if not word:
-            return False
+def _estimate_line_number(self, y_position, avg_line_height=14):
+    """Estimate line number based on y-position."""
+    return round(y_position / avg_line_height)
+
+def _smart_hyphenation_merge(self, highlights):
+    """Smart merging - ONLY for clear hyphenation patterns."""
+    if not highlights:
+        return highlights
+    
+    # Sort by page, color, then position
+    highlights.sort(key=lambda x: (x['page'], x['color'], x['y_position'], x['x_position']))
+    
+    merged = []
+    i = 0
+    
+    while i < len(highlights):
+        current = highlights[i]
         
-        # Common indicators of partial words
-        partial_indicators = [
-            len(word) < 3,  # Very short
-            word.endswith('-'),  # Hyphenated break
-            not word.isalpha() and not word[-1].isalpha(),  # Ends with punctuation
-            word.lower() in ['the', 'and', 'of', 'to', 'in', 'for', 'with'],  # Complete common words
-        ]
-        
-        # If it's a common complete word, it's not partial
-        if word.lower() in ['the', 'and', 'of', 'to', 'in', 'for', 'with', 'a', 'an', 'is', 'are', 'was', 'were']:
-            return False
-        
-        # Check for incomplete endings (consonant clusters that suggest more letters)
-        if len(word) >= 4:
-            ending = word[-2:].lower()
-            incomplete_endings = ['th', 'st', 'nd', 'rd', 'ch', 'sh', 'nt', 'mp', 'ck', 'ng']
-            if any(word.lower().endswith(end) for end in incomplete_endings):
-                return True
-        
-        # Check if it doesn't end with typical word endings
-        common_endings = ['ed', 'ing', 'er', 'est', 'ly', 'ion', 'tion', 'ment', 'ness', 'ful', 'less', 'able', 'ible']
-        if len(word) >= 4 and not any(word.lower().endswith(end) for end in common_endings):
-            return True
-        
+        # Look for hyphenation continuation
+        if (i + 1 < len(highlights) and 
+            self._is_clear_hyphenation(current, highlights[i + 1])):
+            
+            next_hl = highlights[i + 1]
+            merged_text = self._join_hyphenated_text(current['text'], next_hl['text'])
+            
+            merged_highlight = current.copy()
+            merged_highlight['text'] = merged_text
+            
+            if current['page'] != next_hl['page']:
+                merged_highlight['pages_spanned'] = f"Pages {current['page']}-{next_hl['page']}"
+                print(f"  🔗 Cross-page hyphen: \"{merged_text[:80]}\"")
+            else:
+                merged_highlight['hyphen_merged'] = True
+                print(f"  🔗 Same-page hyphen: \"{merged_text[:80]}\"")
+                
+            merged.append(merged_highlight)
+            i += 2  # Skip both highlights
+        else:
+            merged.append(current)
+            i += 1
+    
+    return merged
+
+def _is_clear_hyphenation(self, hl1, hl2):
+    """Detect ONLY clear hyphenation patterns."""
+    # Must be same color
+    if hl1['color'] != hl2['color']:
         return False
+    
+    text1 = hl1['text'].strip()
+    text2 = hl2['text'].strip()
+    
+    # MUST end with hyphen for hyphenation
+    if not text1.endswith('-'):
+        return False
+    
+    # Same page: check reasonable line spacing
+    if hl1['page'] == hl2['page']:
+        y_diff = abs(hl1['y_position'] - hl2['y_position'])
+        # Reasonable line height (8-30 pixels) - slightly more lenient
+        if 8 <= y_diff <= 30 and hl2['y_position'] > hl1['y_position']:
+            print(f"  🔍 Same-page hyphen detected: '{text1}' + '{text2[:15]}'")
+            return True
+    
+    # Cross-page: second highlight should be near top
+    elif hl2['page'] == hl1['page'] + 1 and hl2['y_position'] < 150:
+        print(f"  🔍 Cross-page hyphen detected: '{text1}' + '{text2[:15]}'")
+        return True
+    
+    return False
 
-    def _find_complete_word(self, partial_word, nearby_words, position):
-        """Find the complete word that contains the partial word."""
-        partial_lower = partial_word.lower()
-        
-        candidates = []
-        
-        for word_rect, full_word in nearby_words:
-            full_word_lower = full_word.lower()
-            
-            if position == 'start':
-                # For start position, the partial word should be at the end of the complete word
-                if full_word_lower.endswith(partial_lower) and len(full_word) > len(partial_word):
-                    candidates.append((full_word, len(full_word)))
-            elif position == 'end':
-                # For end position, the partial word should be at the start of the complete word
-                if full_word_lower.startswith(partial_lower) and len(full_word) > len(partial_word):
-                    candidates.append((full_word, len(full_word)))
-        
-        # Return the longest candidate (most likely to be the complete word)
-        if candidates:
-            candidates.sort(key=lambda x: x[1], reverse=True)
-            return candidates[0][0]
-        
-        return partial_word
+def _join_hyphenated_text(self, text1, text2):
+    """Join hyphenated text correctly."""
+    text1 = text1.strip()
+    text2 = text2.strip()
+    
+    if text1.endswith('-'):
+        # Remove hyphen and join
+        return text1[:-1] + text2
+    else:
+        return text1 + " " + text2
 
-    def _extract_text_from_rect_pymupdf(self, page, rect):
-        """Extract text from rectangle using multiple PyMuPDF methods."""
-        try:
-            # Method 1: Direct text extraction
-            text = page.get_text("text", clip=rect)
-            if text and text.strip():
-                return text.strip()
-            
-            # Method 2: Textbox method
-            text = page.get_textbox(rect)
-            if text and text.strip():
-                return text.strip()
-            
-            # Method 3: Expanded rectangle
-            expanded_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 2, rect.x1 + 2, rect.y1 + 2)
-            text_dict = page.get_text("dict", clip=expanded_rect)
-            
-            text_parts = []
-            for block in text_dict.get("blocks", []):
-                if "lines" in block:
-                    for line in block["lines"]:
-                        for span in line["spans"]:
-                            if span["text"].strip():
-                                text_parts.append(span["text"])
-            
-            return " ".join(text_parts)
-        except:
-            return ""
-
-    def _analyze_highlight_color(self, colors):
-        """Analyze highlight color with improved detection."""
-        if not colors:
-            return 'unknown'
-        
-        # Check fill color first (highlight background)
-        if 'fill' in colors and colors['fill']:
-            return self._rgb_to_color_name(colors['fill'])
-        elif 'stroke' in colors and colors['stroke']:
-            return self._rgb_to_color_name(colors['stroke'])
-        
+def _get_highlight_color(self, colors):
+    """Get highlight color - only 4 colors."""
+    if not colors:
+        return 'unknown'
+    
+    if 'fill' in colors and colors['fill']:
+        rgb = colors['fill']
+    elif 'stroke' in colors and colors['stroke']:
+        rgb = colors['stroke']
+    else:
+        return 'unknown'
+    
+    return self._rgb_to_simple_color(rgb)
+def _rgb_to_simple_color(self, rgb):
+    """Convert RGB to one of 4 colors."""
+    if not rgb or len(rgb) < 3:
+        return 'unknown'
+    
+    r, g, b = rgb[:3]
+    
+    if r <= 1:
+        r, g, b = r*255, g*255, b*255
+    
+    if r > 220 and g > 220 and b < 120:
+        return 'yellow'
+    elif r < 120 and g > 180 and b < 120:
+        return 'green'
+    elif r < 120 and g < 180 and b > 180:
+        return 'blue'
+    elif r > 180 and g < 180 and b > 180:
+        return 'pink'
+    else:
+        max_val = max(r, g, b)
+        if max_val == r and r > 150:
+            return 'pink'
+        elif max_val == g and g > 150:
+            return 'green'
+        elif max_val == b and b > 150:
+            return 'blue'
+        elif r > 180 and g > 180:
+            return 'yellow'
         return 'unknown'
 
-    def _get_color_from_annot(self, annot):
-        """Get color from pdfplumber annotation."""
+def _get_simple_color(self, color_rgb):
+    """Get simple color from annotation."""
+    if color_rgb:
+        return self._rgb_to_simple_color(color_rgb)
+    return 'unknown'
+
+def _get_annotation_text(self, page, annot, rect):
+    """Extract annotation text."""
+    text = annot.get('contents', '').strip()
+    if text:
+        return text
+    
+    if rect and len(rect) == 4:
         try:
-            color = annot.get('color', [])
-            if color:
-                return self._rgb_to_color_name(color)
+            x0, y0, x1, y1 = rect
+            cropped = page.crop((x0-1, y0-1, x1+1, y1+1))
+            text = cropped.extract_text()
+            if text and text.strip():
+                return text.strip()
         except:
             pass
-        return 'unknown'
+    
+    return ""
 
-    def _rgb_to_color_name(self, rgb):
-        """Convert RGB values to color names with improved precision."""
-        if not rgb or len(rgb) < 3:
-            return 'unknown'
-        
-        r, g, b = rgb[:3]
-        
-        # Precise color detection
-        if r > 0.7 and g > 0.7 and b < 0.6:
-            return 'yellow'
-        elif r < 0.6 and g > 0.7 and b < 0.6:
-            return 'green'
-        elif r < 0.6 and g < 0.8 and b > 0.7:
-            return 'blue'
-        elif r > 0.7 and g < 0.6 and b > 0.7:
-            return 'pink'
-        elif r > 0.8 and g > 0.5 and b < 0.5:
-            return 'orange'
-        elif r > 0.7 and g < 0.5 and b < 0.5:
-            return 'red'
-        elif r < 0.5 and g > 0.7 and b > 0.7:
-            return 'cyan'
-        else:
-            return f'rgb({r:.2f},{g:.2f},{b:.2f})'
+def extract_all_highlights(self):
+    """Main extraction method."""
+    print("🔍 PDF Highlight Extractor - BALANCED PRECISION")
+    print("🎯 Colors: Yellow, Pink, Green, Blue only")
+    print("🎯 BALANCED extraction - complete highlights without over-capture")
+    print("📏 Small expansion (+2 pixels) for boundary words")
+    print("🔍 40% overlap requirement (was 75% - more inclusive)")
+    print("🔗 Smart hyphenation merging")
+    print("=" * 70)
+    
+    self.annotations = self.extract_annotation_highlights()
+    self.highlights = self.extract_background_highlights()
+    
+    print(f"\n✨ Total: {len(self.annotations)} annotations, {len(self.highlights)} highlights")
+    return self.annotations, self.highlights
 
-    def _clean_text(self, text):
-        """Clean and normalize text."""
-        if not text:
-            return ""
+def display_results(self):
+    """Display results cleanly."""
+    print("\n" + "="*70)
+    print("📋 EXTRACTION RESULTS")
+    print("="*70)
+    
+    all_items = []
+    for item in self.annotations:
+        item['category'] = 'annotation'
+        all_items.append(item)
+    for item in self.highlights:
+        item['category'] = 'highlight'
+        all_items.append(item)
+    
+    if not all_items:
+        print("\n❌ No highlights found")
+        return
+    
+    all_items.sort(key=lambda x: (x['page'], x['y_position']))
+    
+    current_page = None
+    for item in all_items:
+        if item['page'] != current_page:
+            current_page = item['page']
+            print(f"\n📄 Page {current_page}")
+            print("-" * 25)
         
-        try:
-            # Remove extra whitespace and normalize
-            text = re.sub(r'\s+', ' ', text.strip())
-            # Remove line break hyphens
-            text = re.sub(r'-\s+', '', text)
-            # Fix punctuation spacing
-            text = re.sub(r'\s+([.,;:!?])', r'\1', text)
-            return text
-        except:
-            return str(text) if text else ""
+        color_code = self._get_color_display(item['color'])
+        icon = "📝" if item['category'] == 'annotation' else "🎨"
+        
+        merge_info = ""
+        if item.get('pages_spanned'):
+            merge_info = f" ({item['pages_spanned']})"
+        elif item.get('hyphen_merged'):
+            merge_info = " (hyphen-merged)"
+        
+        print(f"{icon} {color_code}{item['color'].upper()}{Style.RESET_ALL}{merge_info}")
+        print(f"   \"{item['text']}\"")
 
-    def _smart_deduplicate(self, items):
-        """Smart deduplication that merges similar highlights."""
-        if not items:
-            return items
-        
-        # Sort by page and position
-        items.sort(key=lambda x: (x['page'], x['y_position'], len(x['text'])))
-        
-        unique_items = []
-        for item in items:
-            is_duplicate = False
-            
-            for existing in unique_items:
-                # Check if this is a duplicate or subset
-                if (item['page'] == existing['page'] and 
-                    item['color'] == existing['color'] and
-                    abs(item['y_position'] - existing['y_position']) < 10):
-                    
-                    # Check text similarity
-                    item_text = item['text'].lower().strip()
-                    existing_text = existing['text'].lower().strip()
-                    
-                    # If one is substring of another, keep the longer one
-                    if item_text in existing_text:
-                        is_duplicate = True
-                        break
-                    elif existing_text in item_text:
-                        # Replace existing with longer text
-                        existing['text'] = item['text']
-                        is_duplicate = True
-                        break
-                    # If very similar (90% overlap), it's a duplicate
-                    elif self._text_similarity(item_text, existing_text) > 0.9:
-                        is_duplicate = True
-                        break
-            
-            if not is_duplicate:
-                unique_items.append(item)
-        
-        return unique_items
+def _get_color_display(self, color_name):
+    """Terminal color codes."""
+    colors = {
+        'yellow': Back.YELLOW + Fore.BLACK,
+        'green': Back.GREEN + Fore.BLACK,
+        'blue': Back.BLUE + Fore.WHITE,
+        'pink': Back.MAGENTA + Fore.WHITE,
+    }
+    return colors.get(color_name, Back.WHITE + Fore.BLACK)
 
-    def _text_similarity(self, text1, text2):
-        """Calculate text similarity ratio."""
-        if not text1 or not text2:
-            return 0
-        
-        # Simple word-based similarity
-        words1 = set(text1.split())
-        words2 = set(text2.split())
-        
-        if not words1 or not words2:
-            return 0
-        
-        intersection = len(words1.intersection(words2))
-        union = len(words1.union(words2))
-        
-        return intersection / union if union > 0 else 0
-
-    def extract_all_highlights(self):
-        """Extract and process all highlights and annotations."""
-        print("🔍 PDF Highlight & Annotation Extractor")
-        print("=" * 50)
-        
-        # Extract annotations
-        self.annotations = self.extract_annotation_highlights()
-        
-        # Extract highlights  
-        self.highlights = self.extract_background_highlights()
-        
-        # Smart deduplication
-        self.highlights = self._smart_deduplicate(self.highlights)
-        
-        print(f"\n✨ Processing complete!")
-        print(f"   📝 Annotations: {len(self.annotations)}")
-        print(f"   🎨 Highlights: {len(self.highlights)}")
-        
-        return self.annotations, self.highlights
-
-    def sort_by_position(self, items):
-        """Sort items by page, then top to bottom."""
-        return sorted(items, key=lambda x: (x['page'], x['y_position']))
-
-    def save_to_json(self, annotations, highlights, output_path):
-        """Save results to JSON file."""
-        data = {
-            'annotations': annotations,
-            'highlights': highlights,
-            'summary': {
-                'total_annotations': len(annotations),
-                'total_highlights': len(highlights),
-                'annotation_colors': list(set(a['color'] for a in annotations)),
-                'highlight_colors': list(set(h['color'] for h in highlights))
-            }
+def save_to_json(self, annotations, highlights, output_path):
+    """Save to JSON."""
+    data = {
+        'annotations': annotations,
+        'highlights': highlights,
+        'summary': {
+            'total_annotations': len(annotations),
+            'total_highlights': len(highlights)
         }
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        print(f"💾 Saved to {output_path}")
+    }
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    print(f"💾 Saved to {output_path}")
 
-    def save_to_csv(self, annotations, highlights, output_path):
-        """Save results to CSV file."""
-        all_items = []
-        for item in annotations:
-            item_copy = item.copy()
-            item_copy['category'] = 'annotation'
-            all_items.append(item_copy)
-        for item in highlights:
-            item_copy = item.copy()
-            item_copy['category'] = 'highlight'
-            all_items.append(item_copy)
-        
-        df = pd.DataFrame(all_items)
-        df.to_csv(output_path, index=False, encoding='utf-8')
-        print(f"📊 Saved to {output_path}")
+def save_to_csv(self, annotations, highlights, output_path):
+    """Save to CSV."""
+    all_items = []
+    for item in annotations:
+        item_copy = item.copy()
+        item_copy['category'] = 'annotation'
+        all_items.append(item_copy)
+    for item in highlights:
+        item_copy = item.copy()
+        item_copy['category'] = 'highlight'
+        all_items.append(item_copy)
+    
+    df = pd.DataFrame(all_items)
+    df.to_csv(output_path, index=False, encoding='utf-8')
+    print(f"📊 Saved to {output_path}")
 
-    def display_results(self):
-        """Display results with clean formatting."""
-        
-        print("\n" + "="*60)
-        print("📋 EXTRACTION RESULTS")
-        print("="*60)
-        
-        # Display Annotations
-        if self.annotations:
-            sorted_annotations = self.sort_by_position(self.annotations)
-            print(f"\n📝 ANNOTATIONS ({len(sorted_annotations)} items)")
-            print("-" * 40)
-            
-            for i, item in enumerate(sorted_annotations, 1):
-                color_code = self._get_color_code(item['color'])
-                print(f"\n{i:2d}. Page {item['page']} | {color_code}{item['color'].upper()}{Style.RESET_ALL}")
-                print(f"    Type: {item['type']}")
-                print(f"    Text: \"{item['text']}\"")
-        else:
-            print(f"\n📝 ANNOTATIONS: None found")
-        
-        # Display Highlights  
-        if self.highlights:
-            sorted_highlights = self.sort_by_position(self.highlights)
-            print(f"\n🎨 BACKGROUND HIGHLIGHTS ({len(sorted_highlights)} items)")
-            print("-" * 40)
-            
-            for i, item in enumerate(sorted_highlights, 1):
-                color_code = self._get_color_code(item['color'])
-                print(f"\n{i:2d}. Page {item['page']} | {color_code}{item['color'].upper()}{Style.RESET_ALL}")
-                print(f"    Text: \"{item['text']}\"")
-        else:
-            print(f"\n🎨 BACKGROUND HIGHLIGHTS: None found")
-        
-        print("\n" + "="*60)
 
-    def _get_color_code(self, color_name):
-        """Get terminal color code for display."""
-        color_map = {
-            'yellow': Back.YELLOW + Fore.BLACK,
-            'green': Back.GREEN + Fore.BLACK,
-            'blue': Back.BLUE + Fore.WHITE,
-            'red': Back.RED + Fore.WHITE,
-            'pink': Back.MAGENTA + Fore.WHITE,
-            'orange': Back.YELLOW + Fore.RED,
-            'cyan': Back.CYAN + Fore.BLACK,
-            'unknown': Back.WHITE + Fore.BLACK
-        }
-        return color_map.get(color_name, Back.WHITE + Fore.BLACK)
+def is_test_mode():
+    """Check if script is run in test mode."""
+    test_flags = ['--test', '-t', 'test']
+    return any(flag in sys.argv for flag in test_flags)
 
 
 def main():
-    print("🎨 PDF Highlight & Annotation Extractor")
-    print("🚀 Enhanced with smart word completion and deduplication")
+    start_time = time.time()
+    
+    test_mode = is_test_mode()
+    
+    print("🎨 PDF Highlight Extractor - BALANCED PRECISION")
+    print("✅ More inclusive extraction (40% overlap vs 75%)")
+    print("✅ Small boundary expansion (+2 pixels)")
+    print("✅ Better word capture at highlight edges")
+    print("✅ Detailed extraction logging")
+    print("✅ Smart hyphenation merging")
+    
+    if test_mode:
+        print("🧪 TEST MODE: Using defaults")
+        print("✅ Default file: /mnt/c/Users/admin/Downloads/test2.pdf")
+        print("✅ Skipping JSON/CSV output")
+    else:
+        print("🔧 FULL MODE: Interactive prompts")
+    
     print()
     
-    # Get PDF file path
-    pdf_path = input("📄 Enter PDF file path: ").strip('"')
+    if test_mode:
+        default_pdf = "/mnt/c/Users/admin/Downloads/test2.pdf"
+        pdf_path = default_pdf
+        print(f"📄 Using default: {pdf_path}")
+    else:
+        pdf_input = input("📄 PDF file path: ").strip('"')
+        if not pdf_input:
+            print("❌ No file specified!")
+            return
+        pdf_path = pdf_input
     
     if not Path(pdf_path).exists():
         print("❌ File not found!")
         return
     
-    # Get output options
-    print("\n📤 Output Options:")
-    output_json = input("💾 JSON file (or Enter to skip): ").strip('"')
-    output_csv = input("📊 CSV file (or Enter to skip): ").strip('"')
+    output_json = ""
+    output_csv = ""
     
-    # Process PDF
+    if test_mode:
+        print("📋 Test mode: Display only (no file output)")
+    else:
+        print("\n📤 Output options:")
+        output_json = input("💾 JSON file (Enter to skip): ").strip('"')
+        output_csv = input("📊 CSV file (Enter to skip): ").strip('"')
+    
+    # Process
     extractor = PDFHighlightExtractor(pdf_path)
     annotations, highlights = extractor.extract_all_highlights()
     
     # Display results
     extractor.display_results()
     
-    # Save results
-    if output_json:
-        extractor.save_to_json(annotations, highlights, output_json)
-    if output_csv:
-        extractor.save_to_csv(annotations, highlights, output_csv)
+    # Save files (only in full mode and if specified)
+    if not test_mode:
+        if output_json:
+            extractor.save_to_json(annotations, highlights, output_json)
+        if output_csv:
+            extractor.save_to_csv(annotations, highlights, output_csv)
+        
+        if not output_json and not output_csv:
+            print("\n📋 Display only - no files saved")
+    
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    
+    print(f"\n⏱️  Processing completed in {elapsed_time:.2f} seconds")
+    
+    if test_mode:
+        print("\n🧪 Test mode completed. Use without --test flag for full options.")
 
 
 if __name__ == '__main__':
